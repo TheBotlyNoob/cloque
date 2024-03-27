@@ -1,0 +1,4 @@
+Diagnostics:
+		Suppress: [redefinition_different_typedef, pp_file_not_found]
+CompileFlags:
+	Remove: [-free, -mlongcalls, -fipa-pta, -mtext-section-literals]
