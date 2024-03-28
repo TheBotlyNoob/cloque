@@ -8,30 +8,24 @@
 #define MATRIX_WIDTH 32
 #define MATRIX_HEIGHT 8
 
+#define PRINT_VAL(s, v)                                                        \
+  Serial.print(s);                                                             \
+  Serial.println(v);
+
 // "borrowed" from fastled.io/docs/_smart_matrix_8ino-example.html
 uint16_t XY(uint8_t x, uint8_t y) {
   uint16_t i;
 
-  if (y & 0x01) {
+  if (x & 0x01) {
     // Odd rows run backwards
-    uint8_t reverseX = (MATRIX_WIDTH - 1) - x;
-    i = (y * MATRIX_WIDTH) + reverseX;
+    uint8_t reverseY = (MATRIX_HEIGHT - 1) - y;
+    i = (x * MATRIX_HEIGHT) + reverseY;
   } else {
     // Even rows run forwards
-    i = (y * MATRIX_WIDTH) + x;
+    i = (x * MATRIX_HEIGHT) + y;
   }
 
   return i;
-}
-
-uint16_t bottom_row(uint8_t x) {
-  if (x & 1) {
-    return x * MATRIX_HEIGHT;
-  } else if (x == 0) {
-    return 0;
-  } else {
-    return (x - 1) * MATRIX_HEIGHT;
-  }
 }
 
 CRGB leds[MATRIX_WIDTH * MATRIX_HEIGHT];
@@ -53,10 +47,10 @@ void setup() {
   FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, MATRIX_WIDTH * MATRIX_HEIGHT);
   FastLED.setBrightness(5);
 
-  WiFi.begin(NETWORK_NAME, NETWORK_PASS); // from conf.h
+  // WiFi.begin(NETWORK_NAME, NETWORK_PASS); // from conf.h
 
-  Serial.print("Connecting to ");
-  Serial.println(NETWORK_NAME);
+  // Serial.print("Connecting to ");
+  // Serial.println(NETWORK_NAME);
 }
 
 void loop() {
@@ -77,8 +71,8 @@ void loop() {
   //     uint8_t bottom_row_x = (uint8_t)floor(percent_through_second * 32);
 
   //     if (bottom_row_x != prev_wifi_loader) {
-  //       leds[bottom_row(prev_wifi_loader)] = CRGB::Black;
-  //       leds[bottom_row(bottom_row_x)] = CRGB::SkyBlue;
+  //       leds[XY(prev_wifi_loader, 7)] = CRGB::Black;
+  //       leds[XY(bottom_row_x, 7)] = CRGB::SkyBlue;
   //       FastLED.show();
 
   //       prev_wifi_loader = bottom_row_x;
@@ -101,8 +95,7 @@ void loop() {
   calling this.
 */
 void print_str(const char str[4]) {
-  Serial.print("PRINTED TO LED MATRIX: ");
-  Serial.println(str);
+  PRINT_VAL("PRINTED TO LED MATRIX: ", str);
   for (int i = 0; i < 4; i++) {
     print_c(str[i]);
   }
@@ -119,9 +112,12 @@ void print_c(unsigned char c) {
   for (x = 0; x < FONT_WIDTH; x++) {
     for (y = 0; y < FONT_HEIGHT - 1;
          y++) { // bottom row is reserved for other stuff
-      idx = XY(x + (FONT_HEIGHT * dig_idx), y);
+      idx = XY(x + (FONT_WIDTH * dig_idx), y);
+      // PRINT_VAL("X: ", x);
+      // PRINT_VAL("Y: ", y);
+      // PRINT_VAL("idx: ", idx);
 
-      if ((bitmap[x] >> y) & 1) {
+      if ((bitmap[y] >> x) & 1) {
         leds[idx] = CRGB::Blue;
       } else {
         leds[idx] = CRGB::Black;
