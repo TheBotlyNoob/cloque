@@ -2,10 +2,30 @@
 #include "ESP8266WiFi.h"
 #include "FastLED.h"
 #include "WiFiClient.h"
+#include "WiFiUdp.h"
 #include "conf.h" // you might have to make this yourself- copy conf.h.example to conf.h and set the proper values
 #include "font.h"
 #include "ledmatrix.h"
 #include "loading.h"
+#include <climits>
+#include <cstring>
+
+// https://stackoverflow.com/a/4956493/14334900
+template <typename T> T swap_endian(T u) {
+  static_assert(CHAR_BIT == 8, "CHAR_BIT != 8");
+
+  union {
+    T u;
+    unsigned char u8[sizeof(T)];
+  } source, dest;
+
+  source.u = u;
+
+  for (size_t k = 0; k < sizeof(T); k++)
+    dest.u8[k] = source.u8[sizeof(T) - k - 1];
+
+  return dest.u;
+}
 
 #define NIST_SERVER "time.nist.gov"
 
@@ -18,8 +38,27 @@ uint8_t dig_idx = 0;
 bool wifi_initial_connected = false;
 
 WiFiClient client;
+WiFiUDP udp;
 
-IPAddress dns(1, 1, 1, 1); // Cloudflare's DNS
+typedef uint64_t timestamp_t;
+
+#pragma pack(push, 1)
+struct SNTP {
+  uint8_t li_vi_mode;
+  uint8_t stratum;
+  int8_t poll_interval;
+  int8_t precision;
+  int32_t root_delay;
+  uint32_t root_dispersion;
+  uint32_t ref_clock_ident;
+  timestamp_t ref_timestamp;
+  timestamp_t originate_timestamp;
+  timestamp_t recv_timestamp;
+  timestamp_t transmit_timestamp;
+};
+#pragma pack(pop)
+
+uint32_t timestamp = 0;
 
 void print_c(unsigned char c);
 void print_str(const char str[4]);
@@ -34,48 +73,57 @@ void setup() {
   FastLED.setBrightness(10);
 
   WiFi.begin(NETWORK_NAME, NETWORK_PASS); // from conf.h
+  udp.begin(123);
 
   Serial.print("Connecting to ");
   Serial.println(NETWORK_NAME);
 
-  print_str("0000"); // base time.
+  print_str("INIT"); // base time.
   FastLED.show();
 }
 
-enum class ConnState { Receiving, Standby };
+enum class ConnState { Receiving, Standby, Done };
 ConnState conn_state = ConnState::Standby;
 
 void while_wifi_connected() {
-  if (conn_state == ConnState::Standby) {
-    Serial.println("Making connection to example");
+  SNTP packet;
 
-    if (client.connect("example.com", 80)) {
-      client.println("GET / HTTP/1.1");
-      client.println("Host: example.com");
-      client.println("Connection: close");
-      client.println();
-    }
+  if (conn_state == ConnState::Standby) {
+    Serial.println("works???");
+    udp.beginPacket("time.nist.gov", 123);
+
+    packet = {
+        0x1B, 00, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    };
+
+    // this is fine- as long as the packet _looks_ right, the server will
+    // probably take it.
+    udp.write(reinterpret_cast<uint8_t *>(&packet), sizeof(packet));
+
+    udp.endPacket();
+    Serial.println("no UB???");
 
     conn_state = ConnState::Receiving;
   } else {
-    tick_loading(millis(), CRGB::Red);
+    uint8_t packet_size = udp.parsePacket();
 
-    while (client.available()) {
-      char c = client.read();
-      Serial.write(c);
-      tick_loading(millis(), CRGB::Red);
-    }
+    unsigned char buf[sizeof(SNTP)];
 
-    if (!client.connected()) {
-      Serial.println();
-      Serial.println("disconnecting from example");
-      client.stop();
+    if (packet_size > 0) {
+      Serial.println("WE GOT A PACKET!");
 
-      reset_loading();
+      packet_size = udp.read((unsigned char *)&buf, sizeof(SNTP));
 
-      conn_state = ConnState::Standby;
+      timestamp = (uint32_t)buf[offsetof(SNTP, transmit_timestamp)];
+      timestamp |= buf[offsetof(SNTP, transmit_timestamp) + 1] << 8;
+      timestamp |= buf[offsetof(SNTP, transmit_timestamp) + 2] << 16;
+      timestamp |= buf[offsetof(SNTP, transmit_timestamp) + 3] << 24;
 
-      delay(10000);
+      PRINT_VAL("TIMESTAMP: ", timestamp);
+
+      // timestamp -= millis() / 1000;
+
+      conn_state = ConnState::Done;
     }
   }
 }
@@ -87,26 +135,6 @@ void loop() {
   dig_idx = 0;
 
   unsigned long curr_millis = millis();
-
-  uint32_t secs_in_day = curr_millis / 1000 % 86400;
-
-  uint8_t hours = round(secs_in_day / 60 / 60);
-  uint8_t mins = round(secs_in_day / 60 % 60);
-
-  if (hours != prev_hours || mins != prev_mins) {
-    char stringified[4]; // we don't need a null byte here, right?
-
-    stringified[3] = mins % 10 + '0';
-    stringified[2] = mins / 10 % 10 + '0';
-    stringified[1] = hours % 10 + '0';
-    stringified[0] = hours / 10 % 10 + '0';
-
-    prev_hours = hours;
-    prev_mins = mins;
-
-    print_str(stringified);
-    FastLED.show();
-  }
 
   // loader "clock"
   if (curr_millis - loading_prev_millis >= 1000)
@@ -124,7 +152,31 @@ void loop() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    // while_wifi_connected();
+    while_wifi_connected();
+  }
+
+  if (timestamp == 0) {
+    uint32_t secs_in_day = (curr_millis / 1000 + timestamp) % 86400;
+
+    uint8_t hours = round(secs_in_day / 60 / 60);
+    uint8_t mins = round(secs_in_day / 60 % 60);
+
+    if (hours != prev_hours || mins != prev_mins) {
+      char stringified[4]; // we don't need a null byte here, right?
+
+      stringified[3] = mins % 10 + '0';
+      stringified[2] = mins / 10 % 10 + '0';
+      stringified[1] = hours % 10 + '0';
+      stringified[0] = hours / 10 % 10 + '0';
+
+      prev_hours = hours;
+      prev_mins = mins;
+
+      print_str(stringified);
+      FastLED.show();
+    }
+  } else if (wifi_initial_connected) {
+    tick_loading(curr_millis, CRGB::Green);
   }
 }
 
