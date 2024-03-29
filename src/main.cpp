@@ -1,39 +1,25 @@
 #include "Arduino.h"
 #include "ESP8266WiFi.h"
 #include "FastLED.h"
+#include "WiFiClient.h"
 #include "conf.h" // you might have to make this yourself- copy conf.h.example to conf.h and set the proper values
 #include "font.h"
+#include "ledmatrix.h"
+#include "loading.h"
 
-#define DATA_PIN 12
-#define MATRIX_WIDTH 32
-#define MATRIX_HEIGHT 8
+#define NIST_SERVER "time.nist.gov"
 
 #define PRINT_VAL(s, v)                                                        \
   Serial.print(s);                                                             \
   Serial.println(v);
 
-// "borrowed" from fastled.io/docs/_smart_matrix_8ino-example.html
-uint16_t XY(uint8_t x, uint8_t y) {
-  uint16_t i;
-
-  if (x & 0x01) {
-    // Odd rows run backwards
-    uint8_t reverseY = (MATRIX_HEIGHT - 1) - y;
-    i = (x * MATRIX_HEIGHT) + reverseY;
-  } else {
-    // Even rows run forwards
-    i = (x * MATRIX_HEIGHT) + y;
-  }
-
-  return i;
-}
-
-CRGB leds[MATRIX_WIDTH * MATRIX_HEIGHT];
 uint8_t dig_idx = 0;
 
-unsigned long wifi_prev_millis = 0;
-uint16_t prev_wifi_loader = 0;
-bool wifi_connected = false;
+bool wifi_initial_connected = false;
+
+WiFiClient client;
+
+IPAddress dns(1, 1, 1, 1); // Cloudflare's DNS
 
 void print_c(unsigned char c);
 void print_str(const char str[4]);
@@ -45,54 +31,106 @@ void setup() {
   Serial.setDebugOutput(true);
 
   FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, MATRIX_WIDTH * MATRIX_HEIGHT);
-  FastLED.setBrightness(5);
+  FastLED.setBrightness(10);
 
-  // WiFi.begin(NETWORK_NAME, NETWORK_PASS); // from conf.h
+  WiFi.begin(NETWORK_NAME, NETWORK_PASS); // from conf.h
 
-  // Serial.print("Connecting to ");
-  // Serial.println(NETWORK_NAME);
+  Serial.print("Connecting to ");
+  Serial.println(NETWORK_NAME);
+
+  print_str("0000"); // base time.
+  FastLED.show();
 }
 
+enum class ConnState { Receiving, Standby };
+ConnState conn_state = ConnState::Standby;
+
+void while_wifi_connected() {
+  if (conn_state == ConnState::Standby) {
+    Serial.println("Making connection to example");
+
+    if (client.connect("example.com", 80)) {
+      client.println("GET / HTTP/1.1");
+      client.println("Host: example.com");
+      client.println("Connection: close");
+      client.println();
+    }
+
+    conn_state = ConnState::Receiving;
+  } else {
+    tick_loading(millis(), CRGB::Red);
+
+    while (client.available()) {
+      char c = client.read();
+      Serial.write(c);
+      tick_loading(millis(), CRGB::Red);
+    }
+
+    if (!client.connected()) {
+      Serial.println();
+      Serial.println("disconnecting from example");
+      client.stop();
+
+      reset_loading();
+
+      conn_state = ConnState::Standby;
+
+      delay(10000);
+    }
+  }
+}
+
+uint8_t prev_hours = 0;
+uint8_t prev_mins = 0;
+
 void loop() {
-  print_str("WIFI"); // FastLED.show() gets called eventually...
-  FastLED.show();
+  dig_idx = 0;
 
-  // dig_idx = 0;
+  unsigned long curr_millis = millis();
 
-  // unsigned long curr_millis = millis();
+  uint32_t secs_in_day = curr_millis / 1000 % 86400;
 
-  // if (WiFi.status() != WL_CONNECTED) {
-  //   if (curr_millis - wifi_prev_millis >= 1000) {
-  //     Serial.println("WiFi not connected.");
-  //     wifi_prev_millis = curr_millis;
-  //   } else {
-  //     double percent_through_second =
-  //         (double)(curr_millis - wifi_prev_millis) / 1000.0;
-  //     uint8_t bottom_row_x = (uint8_t)floor(percent_through_second * 32);
+  uint8_t hours = round(secs_in_day / 60 / 60);
+  uint8_t mins = round(secs_in_day / 60 % 60);
 
-  //     if (bottom_row_x != prev_wifi_loader) {
-  //       leds[XY(prev_wifi_loader, 7)] = CRGB::Black;
-  //       leds[XY(bottom_row_x, 7)] = CRGB::SkyBlue;
-  //       FastLED.show();
+  if (hours != prev_hours || mins != prev_mins) {
+    char stringified[4]; // we don't need a null byte here, right?
 
-  //       prev_wifi_loader = bottom_row_x;
-  //     }
-  //   }
-  // } else if (!wifi_connected) {
-  //   wifi_connected = true;
+    stringified[3] = mins % 10 + '0';
+    stringified[2] = mins / 10 % 10 + '0';
+    stringified[1] = hours % 10 + '0';
+    stringified[0] = hours / 10 % 10 + '0';
 
-  //   leds[bottom_row(prev_wifi_loader)] = CRGB::Black;
-  //   prev_wifi_loader = 0;
-  //   FastLED.show();
+    prev_hours = hours;
+    prev_mins = mins;
 
-  //   Serial.print("WiFi connected. IP address: ");
-  //   Serial.println(WiFi.localIP());
-  // }
+    print_str(stringified);
+    FastLED.show();
+  }
+
+  // loader "clock"
+  if (curr_millis - loading_prev_millis >= 1000)
+    loading_prev_millis = curr_millis;
+
+  if (WiFi.status() != WL_CONNECTED)
+    tick_loading(curr_millis, CRGB::SkyBlue);
+  else if (!wifi_initial_connected) {
+    wifi_initial_connected = true;
+
+    reset_loading();
+
+    Serial.print("WiFi connected. IP address: ");
+    Serial.println(WiFi.localIP());
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    // while_wifi_connected();
+  }
 }
 
 /**
-  Prints an up-to four character string. You must call `FastLED.show()` after
-  calling this.
+  Prints an up-to four character string. You must call `FastLED.show()`
+  after calling this.
 */
 void print_str(const char str[4]) {
   PRINT_VAL("PRINTED TO LED MATRIX: ", str);

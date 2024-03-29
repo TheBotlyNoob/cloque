@@ -1,4 +1,20 @@
-Diagnostics:
-		Suppress: [redefinition_different_typedef, pp_file_not_found]
 CompileFlags:
-	Remove: [-free, -mlongcalls, -fipa-pta, -mtext-section-literals]
+  Add:
+    [
+      -DSSIZE_MAX,
+      -DLWIP_NO_UNISTD_H=1,
+      -Dssize_t=long,
+      -D_SSIZE_T_DECLARED,
+    ]
+  Remove:
+    [
+      -fno-tree-switch-conversion,
+      -mtext-section-literals,
+      -mlongcalls,
+      -fstrict-volatile-bitfields,
+      -free,
+      -fipa-pta,
+    ]
+Diagnostics:
+  Suppress: ["pp_including_mainfile_in_preamble", "invalid_width_spec", "redefinition_different_typedef", "pp_file_not_found"]
+
