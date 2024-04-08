@@ -7,25 +7,6 @@
 #include "font.h"
 #include "ledmatrix.h"
 #include "loading.h"
-#include <climits>
-#include <cstring>
-
-// https://stackoverflow.com/a/4956493/14334900
-template <typename T> T swap_endian(T u) {
-  static_assert(CHAR_BIT == 8, "CHAR_BIT != 8");
-
-  union {
-    T u;
-    unsigned char u8[sizeof(T)];
-  } source, dest;
-
-  source.u = u;
-
-  for (size_t k = 0; k < sizeof(T); k++)
-    dest.u8[k] = source.u8[sizeof(T) - k - 1];
-
-  return dest.u;
-}
 
 #define NIST_SERVER "time.nist.gov"
 
@@ -40,7 +21,15 @@ bool wifi_initial_connected = false;
 WiFiClient client;
 WiFiUDP udp;
 
-typedef uint64_t timestamp_t;
+struct ntp_timestamp_t {
+  uint32_t seconds;
+  uint32_t fraction;
+};
+
+void timestamp_ntoh(ntp_timestamp_t *t) {
+  t->seconds = ntohl(t->seconds);
+  t->fraction = ntohl(t->fraction);
+}
 
 #pragma pack(push, 1)
 struct SNTP {
@@ -51,10 +40,10 @@ struct SNTP {
   int32_t root_delay;
   uint32_t root_dispersion;
   uint32_t ref_clock_ident;
-  timestamp_t ref_timestamp;
-  timestamp_t originate_timestamp;
-  timestamp_t recv_timestamp;
-  timestamp_t transmit_timestamp;
+  ntp_timestamp_t ref_timestamp;
+  ntp_timestamp_t originate_timestamp;
+  ntp_timestamp_t recv_timestamp;
+  ntp_timestamp_t transmit_timestamp;
 };
 #pragma pack(pop)
 
@@ -82,6 +71,8 @@ void setup() {
   FastLED.show();
 }
 
+bool timestamp_initial_recvd = false;
+
 enum class ConnState { Receiving, Standby, Done };
 ConnState conn_state = ConnState::Standby;
 
@@ -89,11 +80,10 @@ void while_wifi_connected() {
   SNTP packet;
 
   if (conn_state == ConnState::Standby) {
-    Serial.println("works???");
-    udp.beginPacket("time.nist.gov", 123);
+    udp.beginPacket(NIST_SERVER, 123);
 
     packet = {
-        0x1B, 00, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0x1B, 0, 0, 0, 0, 0, 0, {0, 0}, {0, 0}, {0, 0}, {0, 0},
     };
 
     // this is fine- as long as the packet _looks_ right, the server will
@@ -101,32 +91,31 @@ void while_wifi_connected() {
     udp.write(reinterpret_cast<uint8_t *>(&packet), sizeof(packet));
 
     udp.endPacket();
-    Serial.println("no UB???");
 
     conn_state = ConnState::Receiving;
   } else {
     uint8_t packet_size = udp.parsePacket();
 
-    unsigned char buf[sizeof(SNTP)];
+    uint8_t buf[sizeof(SNTP)];
 
     if (packet_size > 0) {
-      Serial.println("WE GOT A PACKET!");
-
       packet_size = udp.read((unsigned char *)&buf, sizeof(SNTP));
 
-      timestamp = (uint32_t)buf[offsetof(SNTP, transmit_timestamp)];
-      timestamp |= buf[offsetof(SNTP, transmit_timestamp) + 1] << 8;
-      timestamp |= buf[offsetof(SNTP, transmit_timestamp) + 2] << 16;
-      timestamp |= buf[offsetof(SNTP, transmit_timestamp) + 3] << 24;
+      memcpy(&packet, &buf, sizeof(SNTP));
 
-      PRINT_VAL("TIMESTAMP: ", timestamp);
+      timestamp_ntoh(&packet.transmit_timestamp);
 
-      // timestamp -= millis() / 1000;
+      timestamp = packet.transmit_timestamp.seconds - millis() / 1000;
+
+      timestamp_initial_recvd = true; // it doesn't matter if its past the first
+                                      // recv- it'll still be true anyways
 
       conn_state = ConnState::Done;
     }
   }
 }
+
+bool timestamp_recv_loader_reset = false;
 
 uint8_t prev_hours = 0;
 uint8_t prev_mins = 0;
@@ -155,8 +144,8 @@ void loop() {
     while_wifi_connected();
   }
 
-  if (timestamp == 0) {
-    uint32_t secs_in_day = (curr_millis / 1000 + timestamp) % 86400;
+  if (timestamp != 0) {
+    uint32_t secs_in_day = (curr_millis / 1000 + timestamp + (TZ_HOUR_CHANGE * 60 * 60)) % 86400;
 
     uint8_t hours = round(secs_in_day / 60 / 60);
     uint8_t mins = round(secs_in_day / 60 % 60);
@@ -173,6 +162,11 @@ void loop() {
       prev_mins = mins;
 
       print_str(stringified);
+      if (!timestamp_recv_loader_reset) {
+        reset_loading();
+        timestamp_recv_loader_reset = true;
+      }
+      FastLED.show();
       FastLED.show();
     }
   } else if (wifi_initial_connected) {

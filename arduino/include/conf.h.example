@@ -1,0 +1,4 @@
+#define NETWORK_NAME ""
+#define NETWORK_PASS ""
+
+#define TZ_HOUR_CHANGE -4 // rn its in EST; change it to your proper timezone
